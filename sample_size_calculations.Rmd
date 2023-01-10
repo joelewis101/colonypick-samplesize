@@ -1,0 +1,239 @@
+---
+title: "Some initial sample size calculations for number of colony picks."
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+bibliography: /Users/joelewis/Zotero/my_library.bib
+---
+
+# Introduction
+
+Assume we have the following situation: a sample (for example a stool sample)
+is plated out. A number of bacterial colonies grow. We have a typing assay of
+some kind (for example whole-genome sequencing). How many colonies do we need
+to pick and type to have a reasonable certainty that we have captured all of
+the diversity in a sample? In what follows, I'll refer to a uniquely typed
+colony as a strain.
+
+# Assumptions
+
+We'll need to make some assumptions about the distribution of strains within a
+participant. These assumptions could be very simple (each person carried 5
+strains) but beyond that, the assumptions will need to be encoded as a
+probability distribution; so the choice becomes: which probability
+distribution, and what parameters to use to define the distribution?
+
+# A simple example - Poisson distribution
+
+## Parameters that define the Poisson distribution
+
+The Poisson distribution is the distribution of events that happen at a random
+interval which occur separated by at time (or distance) interval defined by the
+parameter $\lambda$ - for example, it's been used to model the number of
+marketing text messages received per year. It looks like the plots below. It
+can be described using a probability density function (top), which shows the
+probability of a sample containing exactly $x$ strains, for a given $\lambda$.
+Or it can be expressed as a cumulative distribution function (bottom) which
+shows the probability of a sample containing $x$ or fewer samples, for a given
+$\lambda$.
+
+The mean of a Poisson distribution is $\lambda$, so by setting a value to this
+parameter, we are setting the mean number of strains per sample in our
+population.
+
+```{r poisson_dist}
+
+# plot Poisson distribution with varying lambda
+# first load packages
+library(tidyverse)
+
+tibble(
+  lambda = rep(1:10, each = 21),
+  x = rep(0:20, 10),
+  prob_x = dpois(x, lambda)
+) |>
+ggplot(aes(x,prob_x, color = lambda, group = lambda)) +
+  geom_line() +
+  labs(title = "Number of strains per sample, assuming Poisson distribution",
+       subtitle = "Lambda varied from 1 to 10")
+
+
+tibble(
+  lambda = rep(1:10, each = 21),
+  x = rep(0:20, 10),
+  prob_x = ppois(x, lambda)
+) |>
+ggplot(aes(x,prob_x, color = lambda, group = lambda)) +
+  geom_line() +
+  labs(title = "Cumulative distribution function of strains, assuming Poisson
+       distribution",
+       subtitle = "Lambda varied from 1 to 10")
+
+
+```
+
+## A power calculation
+
+We have enough to make a power calculation - if we make an assumption about
+$\lambda$ we can use the cumulative distribution function to estimate how many
+samples we need to identify all the strains in a sample, 90% of the time (for
+example). So, for example, if $\lambda$ were 5, then 8 samples would identify
+all the diversity in a sample, 90% the time.
+
+```{r poisson_sample_calc}
+
+tibble(
+  lambda = rep(5, 21),
+  x = 0:20,
+  prob_x = ppois(x, lambda)
+) |>
+ggplot(aes(x,prob_x)) +
+  geom_line() +
+  geom_hline(yintercept = 0.9, linetype = "dotted") +
+  labs(title = "Cumulative distribution function of strains, lambda = 5",
+       subtitle = "Dotted line shows 0.9") +
+       scale_x_continuous(breaks = seq(0,20, by = 2))
+
+```
+
+## What should $\lambda$ be?
+
+This has to come from the literature; one approach could be to fit a Poisson
+model to a distribution extracted from a paper. For example, in the Stoesser
+paper [@stoesser2015] they took 16 colony picks from 8 samples from children in
+Cambodia. They cultured stool onto CHROMagar plates with neat, 1:5 and 1:100
+dilutions and a cefpodoxime disc on each plate; took 8 pink colonies from
+within the inhibition zone, and 8 from outside. Isolates were characterised by
+WGS. I've pulled out the number of ESBL strains for each sample and defined a
+clone as per their paper - no more than 2 SNVS - but with the added criterion
+that the AMR gene profile must be the same.
+
+```{r stoesser-clone-distn}
+
+# make a tibble with the data
+
+tibble(
+       subject =           c(244,86,232,357,45,813,1178,717),
+       n_esbl_clones =     c(1,  6, 1,  1,  1, 1,  3,   0), 
+       n_non_esbl_clones = c(2,  0, 4,  3,  9, 0,  0,   5)
+) -> stoesser_data
+
+# plot it
+
+stoesser_data |>
+       pivot_longer(-subject) |>
+       ggplot(aes(value)) +
+         geom_bar() +
+         facet_wrap(~ name) +
+         scale_x_continuous(breaks = 0:10, labels = 0:10) +
+         labs(title = "Number of clones/patient from Stoesser et al")
+
+```
+
+## Fit a Poisson distribution using *glm* in R and plot 
+
+The code below fits a Poisson distribution to the Stoesser data, and plots it.
+You can see, its not a very good fit. There are many more participants with
+strain than the model would predict, and the observed participant with 6
+strains would be very very unusual. 
+
+A better fit would likely be with a different probability distribution. The
+Poisson distribution has a fixed variance equal to the mean. We can already
+see that this is likely not true for this data (variance = 3.6, mean = 1.75).
+Still, this at least demonstrates the concept.
+
+```{r estimate_lambda_from_stoesser2015}
+
+# use glm to fit a Poisson model
+# Just like fitting a logistic regression except 
+# a) Poisson instead of logit and b) no covariates
+
+glm(n_esbl_clones ~ 1, family= poisson(), data = stoesser_data) -> model
+
+# get the estimates of lambda and confidence intervals out of the model
+# we can interpret the intercept as lambda here
+
+lambda_estimate <- exp(coef(model))
+
+# What is teh fitted lambda?
+
+lambda_estimate
+
+# plot the actual data with the modelled Poisson distribution
+# we could do this just  plugging lambda into a Poisson distribution
+# or we can simulate from the fitted model
+
+# here we'll do the latter
+# we'll simulate 1000 times form the model to make an empiric probability
+# distribution
+
+model_preds <-
+  simulate(model, nsim = 10000) |>
+  as.data.frame() |>
+  pivot_longer(everything()) |>
+  count(value) |>
+  transmute(
+    x = value,
+    pr_x = n / sum(n),
+    type = "model predictions - Poisson"
+  )
+
+
+# then change the actual data to proportions
+
+stoesser_proportions <-
+  stoesser_data |>
+  count(n_esbl_clones) |>
+  transmute(
+    x = n_esbl_clones,
+    pr_x = n / sum(n),
+    type = "stoesser data"
+  )
+
+# plot them together
+
+ggplot(stoesser_proportions,
+        aes(x, pr_x, color = type, fill = type)) +
+       geom_col() +
+       geom_line(data = model_preds) +
+       labs(title = "Actual vs predicted number of strains",
+            subtitle = "Fitting a Poisson model to Stoesser 2015 data")
+
+```
+
+
+## How many samples to pick using this model?
+
+So, the Poisson distribution doesn't seem to fit very well to the Stoesser
+data. Notwithstanding that, how many colonies should we pick assuming that the
+number of strains is distributed with Poisson distribution and $\lambda$
+determined by fitting to the Stoesser data?
+
+To determine this, we'll plot the cumulative distribution function from the
+fitted model, and look to see at what point the probability crosses 0.9.
+Remember, the interpretation of this is: 90% of the time, picking this many
+colonies will capture all diversity. Here it sits just above 3 - i.e need 4
+colony picks.
+
+
+```{r fitted-poisson-sample-size}
+
+  simulate(model, nsim = 10000) |>
+  as.data.frame() |>
+  pivot_longer(everything()) |>
+  ggplot(aes(value)) +
+    stat_ecdf(geom = "line") +
+    geom_hline(yintercept = 0.9, linetype = "dotted") +
+    scale_x_continuous(breaks = 0:10)
+
+```
+
+# Next steps
+
+The Stoesser paper only includes 8 samples - it's probably not worth expending
+too much effort in fitting a distribution to so little data. It's also from
+children in Cambodia - it may not be applicable to our setting. But - the
+approach can be used I think - we just need more data! What is out there in the
+literature than can inform this sample size calculation?
+
+# References
