@@ -1,0 +1,353 @@
+---
+title: Fitting Poisson-lognormal distribution to E coli strain data
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+# Introduction
+
+Fitting a Poisson model in R fits the following equation
+
+$ln(\lambda_{i}) = \alpha + \beta x_{i}$
+
+where $y_{i} \sim Poisson(\lambda_{i})$
+
+and $y_{i}$ is the response variable for participant $i$ (counts of strains in
+our calculations), $\beta$ are regression coefficients for a predictor variable
+$x_{i}$ , and the $\sim$ notation means that the $y_{i}$ follow a Poisson
+distribution. In our calculations, we have had no predictor variables so the
+call to **glm** in R to fit a Poisson model just gives us the intercept
+$\alpha$ - really just $\lambda$, log transformed. The log transformation makes
+sure that $\lambda$ is always positive, in the world of generalised linear
+models (of which this and logistic regression etc are) - this is called a link
+function. This way of writing out the model is a standard statistical modelling
+way of doing it.
+
+To fit a Poisson-lognormal model we want to allow each individual to have a
+$\lambda$ that is a draw from a lognormal distribution. This is achieved by
+fitting a **random effect** - what this means is that we add a parameter to the
+model and allow it to vary for each individual. This is useful in any effect
+where observations are nested within other structures. For example if you are
+modelling exam results for pupils within schools, then you can include a **random
+effect** for each school which will account for the effect of that school - you
+would then add fixed effects for the things you are interested in that you
+think might effect exam results (socioeconomic status, gender etc etc) as
+**fixed effects**. We assume that the effect of school is drawn from a normally
+distributed population of schools. When we fit the model we will get back a mean
+and a standard deviation that defines this distribution.
+
+To fit our E. coli model we do the same thing, but we have a population of
+people all with a different lambda:
+
+
+$ln(\lambda_{i}) \sim Normal(\mu, \sigma)$
+
+$y_{i} \sim Poisson(\lambda_{i})$
+
+Where $\mu$ is the mean and $\sigma$ the standard deviation of the distribution
+of $\lambda$ in our population. The code below fits this model to the Stoesser
+data.
+
+```{r Fit-model}
+
+library(tidyverse)
+library(lme4)
+library(patchwork)
+
+tibble(
+       subject =           c(244,86,232,357,45,813,1178,717),
+       n_esbl_clones =     c(1,  6, 1,  1,  1, 1,  3,   0), 
+       n_non_esbl_clones = c(2,  0, 4,  3,  9, 0,  0,   5),
+) -> stoesser_data
+
+# in the R notation for fitting models a random effect like this per
+# participant is fitted by adding (1 | variable) so:
+
+
+
+glmer(n_esbl_clones ~ (1 | subject), 
+      family = "poisson",
+      data = stoesser_data) -> m
+# summarise model
+
+summary(m)
+
+```
+
+We interpret this as follows; the main bits to look at are the *fixed effect*
+and *random effect* results:
+
+- The fixed effect is labelled intercept. We can interpret this as the log of
+  the Poisson parameter $\lambda$ - so we do $exp(0.36) = 1.43 = \lambda$. This
+  is the "average" value for the population.
+- The random effect has a variance of 0.38. This that for any individual, the
+  value of $log(\lambda)$ is 0.36 plus a value drawn from a normal distribution
+  with centre 0 and variance 0.38).
+
+Now we need to simulate picking samples from this population - a it more
+involved but similar to before. Still not a great fit but I've added confidence
+intervals to Stoesser distribution to show that it is a pretty small number of
+samples which I guess may be causing issues.
+
+Added a dotted line for 95% - so 5 colony picks would get all the clones, 95%
+of the time here ...
+
+```{r simulate-from-model}
+
+
+stoesser_proportions <-
+  stoesser_data |>
+  count(n_esbl_clones) |>
+  mutate(tot = sum(n)) |>
+  rowwise() |>
+  transmute(
+    value = n_esbl_clones,
+    med = n / tot,
+    lci = binom.test(n,tot)$conf.int[[1]],
+    uci = binom.test(n,tot)$conf.int[[2]],
+    type = "stoesser data"
+  )
+
+  nsubj <- 1000
+  nsim <- 10000
+
+  simulate(m, newdata = data.frame(subject = 1:nsubj),
+allow.new.levels = TRUE,
+         nsim = nsim,
+re.form = NA
+) |>
+pivot_longer(everything())|>
+count(name, value) |>
+group_by(name) |>
+mutate(prop = n/sum(n)) |>
+group_by(value) |>
+summarise(lci = quantile(prop, 0.025),
+med = median(prop),
+uci = quantile(prop, 0.975),
+type = "model fit") |>
+ggplot(aes(value, med, ymin = lci, ymax = uci, color = type, fill = type)) +
+  geom_line() +
+  geom_ribbon(color = NA, alpha = 0.3) +
+  geom_line(data = stoesser_proportions) +
+  geom_ribbon(data = stoesser_proportions, alpha = 0.3, color = NA) 
+
+
+  simulate(m, newdata = data.frame(subject = 1:nsubj),
+allow.new.levels = TRUE,
+         nsim = nsim,
+re.form = NA
+) |>
+  as.data.frame() |>
+  pivot_longer(everything()) |>
+  ggplot(aes(value)) +
+    stat_ecdf(geom = "line") +
+    geom_hline(yintercept = 0.95, linetype = "dotted") +
+    scale_x_continuous(breaks = c(0:10,20,30, 40))
+
+
+```
+
+# Fit the model to the other data sets.
+
+What about the other datasets - how different are the distributions - lets plot
+them!
+
+For Schlager I have included each participant separately for each time point.
+
+Different - but perhaps not dramatically so. Still, fit model separately to
+all.
+
+```{r plot-all-data}
+
+div_data <- read_csv("diversity_data.csv")
+
+# convert to proportion with CI
+
+div_data |> 
+count(Study, n_clones) |>
+group_by(Study) |>
+  mutate(tot = sum(n)) |>
+  rowwise() |>
+  transmute(
+            Study = Study,
+    n_clones = n_clones,
+    prop = n / tot,
+    lci = binom.test(n,tot)$conf.int[[1]],
+    uci = binom.test(n,tot)$conf.int[[2]],
+  ) |>
+           ggplot(aes(n_clones, prop, ymin = lci, ymax = uci, color = Study,
+                      fill = Study)) +
+                  geom_line(size = 1) +
+                  geom_ribbon(color = NA, alpha = 0.3)
+
+
+
+```
+
+## Make a function to simulate and plot fitted models
+
+```{r model2}
+
+# if we're going to do the same thing multiple times - make a function!
+
+simulate_and_plot_from_fitted_model <- function(fitted_model,
+                                                raw_data,
+                                                study_name,
+                                                nsubj = 1000,
+                                                nsim = 10000) {
+  raw_data |>
+    count(n_clones) |>
+    mutate(tot = sum(n)) |>
+    rowwise() |>
+    transmute(
+      value = n_clones,
+      med = n / tot,
+      lci = binom.test(n, tot)$conf.int[[1]],
+      uci = binom.test(n, tot)$conf.int[[2]],
+      type = "raw data"
+    ) -> raw_data_props
+
+  simulate(fitted_model,
+    newdata = data.frame(pid = 1:nsubj),
+    allow.new.levels = TRUE,
+    nsim = nsim,
+    re.form = NA
+  ) -> sims_df
+
+  sims_df |>
+    pivot_longer(everything()) |>
+    count(name, value) |>
+    group_by(name) |>
+    mutate(prop = n / sum(n)) |>
+    group_by(value) |>
+    summarise(
+      lci = quantile(prop, 0.025),
+      med = median(prop),
+      uci = quantile(prop, 0.975),
+      type = "model fit"
+    ) |>
+    ggplot(aes(value, med, ymin = lci, ymax = uci, color = type, fill = type)) +
+    geom_line() +
+    geom_ribbon(color = NA, alpha = 0.3) +
+    geom_line(data = raw_data_props) +
+    geom_ribbon(data = raw_data_props, alpha = 0.3, color = NA) +
+    labs(title = paste0("Study: ", study_name)) -> plot_a
+
+
+  sims_df |>
+    pivot_longer(everything()) |>
+    ggplot(aes(value)) +
+    stat_ecdf(geom = "line") +
+    geom_hline(yintercept = 0.95, linetype = "dotted") +
+    scale_x_continuous(breaks = c(0:10, 20, 30, 40)) +
+    labs(title = paste0("Study: ", study_name)) -> plot_b
+
+  return(list(plot_a, plot_b))
+}
+
+
+
+
+```
+
+
+## Fit the model: Ludden
+
+```{r plot-ludden}
+
+glmer(n_clones ~ (1 | pid), 
+      family = "poisson",
+      data = filter(div_data, Study == "Ludden" ),
+      control = glmerControl(optimizer = "bobyqa")) -> m2
+
+summary(m2)
+
+simulate_and_plot_from_fitted_model(
+  fitted_model = m2,
+  raw_data = filter(div_data, Study == "Ludden"),
+  study_name = "Ludden")
+
+
+```
+
+
+## Fit the model: Dixit
+
+```{r plot-Dixit}
+
+glmer(n_clones ~ (1 | pid), 
+      family = "poisson",
+      data = filter(div_data, Study == "Dixit" ),
+      control = glmerControl(optimizer = "bobyqa")) -> m3
+
+summary(m3)
+
+simulate_and_plot_from_fitted_model(
+  fitted_model = m3,
+  raw_data = filter(div_data, Study == "Dixit"),
+  study_name = "Dixit") 
+
+
+
+
+```
+
+
+## Fit the model: Foster-Nyako
+
+
+```{r plot-Foster-Nyako}
+
+glmer(n_clones ~ (1 | pid), 
+      family = "poisson",
+      data = filter(div_data, Study == "Foster-Nyako" ),
+      control = glmerControl(optimizer = "bobyqa")) -> m4
+
+summary(m4)
+
+simulate_and_plot_from_fitted_model(
+  fitted_model = m4,
+  raw_data = filter(div_data, Study == "Foster-Nyako"),
+  study_name = "Foster-Nyako")
+
+```
+
+
+## Fit the model: Schlager
+
+```{r plot-Schlager}
+
+glmer(n_clones ~ (1 | pid), 
+      family = "poisson",
+      data = filter(div_data, Study == "Schlager" ),
+      control = glmerControl(optimizer = "bobyqa")) -> m5
+
+summary(m5)
+
+simulate_and_plot_from_fitted_model(
+  fitted_model = m5,
+  raw_data = filter(div_data, Study == "Schlager"),
+  study_name = "Schlager")
+
+```
+
+# Conclusions
+
+Note the warnings of the model fits for all of these except Schlager - that the
+fit is "singular." What this means is that the variance of the random effect is
+very close to 0. We can interpret this as meaning that in these datasets, there
+is not enough information to reliably estimate the parameter - the $\lambda$
+may as well be fixed for the whole population. More data would probably help.
+
+In the Schlager dataset we have *multiple observations per participant* which
+helps fit the model - it may not be a bad fit (although the model predicts a
+number of people with **no** strains which we do not see).
+
+Perhaps, after all of this, 6 colony picks in the first instance and see where
+we are? We need to bear in mind of course that most of these papers are looking
+at a high level strain definition (ST etc) and we are interested in strains
+defined by very close relationship (measured in SNP distances) - but this
+approach at least gives us a justification!
+
+
