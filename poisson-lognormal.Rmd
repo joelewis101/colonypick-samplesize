@@ -187,6 +187,11 @@ group_by(Study) |>
 
 ## Make a function to simulate and plot fitted models
 
+On reflection, we should plot the ECDF plots (the cumulative probabiolity ones)
+after excluding all samples with no strains found as we will pick no colonies
+from them - I've added this below (wasn't in earlier versions) - 6 picks still
+seems reasonable!
+
 ```{r model2}
 
 # if we're going to do the same thing multiple times - make a function!
@@ -237,6 +242,7 @@ simulate_and_plot_from_fitted_model <- function(fitted_model,
 
   sims_df |>
     pivot_longer(everything()) |>
+    filter(value > 0) |>
     ggplot(aes(value)) +
     stat_ecdf(geom = "line") +
     geom_hline(yintercept = 0.95, linetype = "dotted") +

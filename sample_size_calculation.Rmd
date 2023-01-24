@@ -1,0 +1,119 @@
+---
+title: Sample size calculation for Sarah's _E. coli_ diversity experiments
+author: "Joe Lewis"
+output: html_document
+---
+
+# Setup
+
+The starting point is that we want to run the MGEMS/MSWEEP pipeline on a number
+of stool samples alongside single colony picks and WGS. We want to quantify
+diversity missed by either method and compare assemblies from WGS and MGEMS.
+
+We assume that the number of ESBL strains within an individual is
+Poisson-lognormal distributed (i.e. the number of species is given by a Poisson
+distribution where the Poisson rate parameter, $\lambda$ is itself log-normally
+distributed), i.e.
+
+log($\lambda) \sim Normal(\mu, \sigma)$
+
+The distribution is _zero-truncated_ - that is, all samples with 0 strains are
+dropped, because we won't pick any strains from samples with no ESBLS; hence we
+want a _zero truncated Poisson-lognormal distribution_. We assume that we'll
+pick $n$ colony picks from each sample where any ESBL is identified, where
+previous fits to data from the literature suggests $n=6$ colony picks has a
+good chance of identifying all strains (where, importantly, strain is defined
+at the ST level or some other high level clustering method) in a sample.
+
+How should we decide how many samples to use to compare MSWEEP/MGEMS to WGS
+colony pick strategies? On a approach would be to say that we want to know in
+what proportion of samples we miss one or more ESBL strains with WGS; if we are
+interested in transmission, then this proportion is possible missed
+transmission events. We can power a comparison to define this proportion to a
+certain accuracy; say +/- 10% (an arbitrary choice!). This will depends on
+$\mu$, $\sigma$, and $n$; we can estimate values of $\mu$ and $\sigma$ from the
+fits we have made to the data.
+
+The sample size calculation method will therefore be:
+
+- Pick some likely values for $\mu$ and $\sigma$ based on available data
+- For these values, use the cumulative distribution function of the
+  zero-truncated Poisson lognormal distribution to determine the proportion of
+  samples that will have > $n$ strains
+- Calculate the number of samples that will be needed to estimate this
+  proportion with an accuracy +/10%
+
+
+# Zero-truncated poisson-lognormal distributions
+
+First plot the distributions for a variety of parameter values. The range of
+$\mu$ from fitting to data was 0.4-1 and the range of $\sigma$ was 0-0.4. 
+
+```{r poisson-lognormal, warning = FALSE, message = FALSE}
+
+library(ztpln) # this package gives the zero truncated Poisson- lognormal distribution
+library(tidyverse)
+library(presize) # this gives function to calculate sample size
+
+mu <- c(0.5,1,1.5)
+sig <- c(0.01, 0.3, 0.6)
+
+
+# first plot the distributions for given parameter values
+
+crossing(mu,sig, x = 1:10) |>
+rowwise() |>
+mutate(dens = dztpln(x = x, mu = mu, sig = sig),
+       mu = paste0("mu = ", mu),
+       sig = paste0("sigma =", sig)) |>
+ggplot(aes(x,dens)) +
+  geom_col() +
+  facet_grid(mu ~ sig)
+
+```
+
+# Sample size calculations
+
+I've added a black horizontal line at 25 samples - for the parameter values
+that fit the data we have ($\mu$ up to 1 and $\sigma$ up to 0.3) this will
+allow estimated on proportion of samples with missed strains +/- 10%.
+
+This would involve sequencing of 25x6 = 150 colonies, which seems reasonable. I
+think there is advantage in picking a small number of samples/ colony picks
+initially - if we find that we need to do more, we can always do that!
+
+```{r sim-studies, message = FALSE, warning = FALSE}
+
+# define ranges of parameter values
+
+mu <- seq(from = 0.3, to = 1.5, by = 0.1)
+sig <- c(0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+
+# define a cumulative probability function
+pztpln <- function(n,mu,sig) {
+  sum(dztpln(1:n,mu,sig))
+}
+
+
+#calculate and plot
+
+crossing(mu, sig,
+  cutoff = 6
+) |>
+  rowwise() |>
+  mutate(
+    missed_prop = 1 - pztpln(cutoff, mu, sig),
+    n = prec_prop(p = missed_prop, conf.width = 0.2, method = "wilson" )$n,
+    sig = as.character(sig)
+  ) |>
+  ggplot(aes(mu, n, group = sig, color = sig)) +
+  geom_line() +
+  facet_wrap(~cutoff) +
+  labs(
+    color = "sigma",
+    title = "n to estimate proportion samples with missed strains +/- 10%"
+  ) +
+  geom_hline(aes(yintercept = 25))
+
+
+```

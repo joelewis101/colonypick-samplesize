@@ -1,0 +1,156 @@
+---
+title: Looking a bit closer at Ludden data
+author: "Joe Lewis"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+# Background
+
+Poisson-lognormal models overpredict the number of people in which we will find
+*no* strains of E coli - is this just because these data are not included in
+the dataset?
+
+Look at the Ludden paper to explore this possibility.
+
+```{r setup}
+library(tidyverse)
+library(janitor)
+library(lme4)
+
+# plot model function
+
+simulate_and_plot_from_fitted_model <- function(fitted_model,
+                                                raw_data,
+                                                study_name,
+                                                nsubj = 1000,
+                                                nsim = 10000) {
+  raw_data |>
+    count(n_clones) |>
+    mutate(tot = sum(n)) |>
+    rowwise() |>
+    transmute(
+      value = n_clones,
+      med = n / tot,
+      lci = binom.test(n, tot)$conf.int[[1]],
+      uci = binom.test(n, tot)$conf.int[[2]],
+      type = "raw data"
+    ) -> raw_data_props
+
+  simulate(fitted_model,
+    newdata = data.frame(pid = 1:nsubj),
+    allow.new.levels = TRUE,
+    nsim = nsim,
+    re.form = NA
+  ) -> sims_df
+
+  sims_df |>
+    pivot_longer(everything()) |>
+    count(name, value) |>
+    group_by(name) |>
+    mutate(prop = n / sum(n)) |>
+    group_by(value) |>
+    summarise(
+      lci = quantile(prop, 0.025),
+      med = median(prop),
+      uci = quantile(prop, 0.975),
+      type = "model fit"
+    ) |>
+    ggplot(aes(value, med, ymin = lci, ymax = uci, color = type, fill = type)) +
+    geom_line() +
+    geom_ribbon(color = NA, alpha = 0.3) +
+    geom_line(data = raw_data_props) +
+    geom_ribbon(data = raw_data_props, alpha = 0.3, color = NA) +
+    labs(title = paste0("Study: ", study_name)) -> plot_a
+
+
+  sims_df |>
+    pivot_longer(everything()) |>
+    ggplot(aes(value)) +
+    stat_ecdf(geom = "line") +
+    geom_hline(yintercept = 0.95, linetype = "dotted") +
+    scale_x_continuous(breaks = c(0:10, 20, 30, 40)) +
+    labs(title = paste0("Study: ", study_name)) -> plot_b
+
+  return(list(plot_a, plot_b))
+}
+```
+
+```{r load-data-and-plot}
+
+read_csv("ludden_supp_data_S2.csv") |>
+janitor::clean_names() -> ludden_df
+
+ludden_df |>
+mutate(esbl = if_else(esbl == "AmpC", "ESBL",esbl)) |>
+count(patient_id, st, esbl) |>
+mutate(esbl = as.factor(esbl)) |>
+select(-n) |>
+count(patient_id, esbl, .drop = FALSE) |>
+ggplot(aes(n, fill = esbl)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ esbl) +
+  labs(title = "Number of STs per participant",
+  subtitle = "lumping ESBL and ampC together")
+
+```
+
+# Fit a model coutning ESBL strains only - including no strains found
+
+
+```{r ludden_diversity_model_Title}
+
+ludden_df |>
+mutate(esbl = if_else(esbl == "AmpC", "ESBL",esbl)) |>
+count(patient_id, st, esbl) |>
+mutate(esbl = as.factor(esbl)) |>
+select(-n) |>
+rename(pid = patient_id) |>
+count(pid, esbl, .drop = FALSE, name = "n_clones") |>
+filter(esbl == "ESBL") -> mod_df
+
+
+
+glmer(n_clones ~ (1 | pid), 
+      family = "poisson",
+      data = mod_df, 
+      control = glmerControl(optimizer = "bobyqa")) -> m_lud
+
+m_lud
+
+
+simulate_and_plot_from_fitted_model(
+  fitted_model = m_lud,
+  raw_data = mod_df,
+  study_name = "Ludden")
+
+```
+
+# Conclusions
+
+- Model is a pretty good fit  
+- Model is singular - probably a simple Poisson would do as well
+- Strain diversity (in terms of ST) of ESBLs is not very high: in this
+  situation maybe should remove all the people with 0 strains to decide on a
+  number of colony picks - e.g. below, where 2 picks would do.
+
+  ```{r ditch-0-strains}
+
+
+  simulate(m_lud,
+    newdata = data.frame(pid = 1:1000),
+    allow.new.levels = TRUE,
+    nsim = 10000,
+    re.form = NA
+  ) -> sims_df
+
+  sims_df |>
+  pivot_longer(everything()) |>
+filter(value > 0) |>
+    ggplot(aes(value)) +
+    stat_ecdf(geom = "line") +
+    geom_hline(yintercept = 0.95, linetype = "dotted") +
+    labs(title = paste0("Study: Ludden"))
+
+  
+  ```
